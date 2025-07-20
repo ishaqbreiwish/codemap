@@ -10,13 +10,14 @@ summary_command = \"llama-cli summarize\"\n\n\
 # Optional: Project tag for filtering later (future feature)\n\
 project_name = \"my-project\"";
 
-use anyhow::{Result};
+use anyhow::{Result, anyhow};
 use clap::Parser;
 use serde::{Serialize, Deserialize};
 use std::fs;
 use std::path::Path;
 use std::io::Write; // for flushing stdout
 use std::fs::File;
+use std::process::Command;
 use rprompt::prompt_reply;
 use chrono::Utc;
 use toml;
@@ -38,6 +39,7 @@ struct LogEntry {
 }
 
 #[derive(Debug)]
+#[derive(Deserialize)]
 struct Config {
     default_note_count: Option<usize>,
     timestamp_format: Option<String>,
@@ -47,15 +49,16 @@ struct Config {
 }
 
 impl Config {
-    fn load() -> Result<Config> => {
+    fn load() -> Result<Config> {
         let path = Path::new(".codemap/");
         let config_path = path.join("config.toml");
 
         let content = match fs::read_to_string(&config_path) {
             Ok(c) => c,
-            Err(_) => eprintln!("Could not read file `{}`", &config_path);
-        }
+            Err(_) => return Err(anyhow!(".codemap/config.toml is missing"))
+        };
 
+        Ok(toml::from_str(&content)?)
     }
 }
 
@@ -64,7 +67,11 @@ impl Config {
 #[command(rename_all = "lowercase")]
 enum Commands {
     Init, // initializes remind me project
-    Note {note: Option<String>,}, // adds a new note
+    Add {
+        note: Option<String>,
+        #[arg(long)]
+        auto: bool,
+    },
     Show {num: Option<i32>},
     Summary,
 }
@@ -134,6 +141,37 @@ fn add_note(note: &str) {
     println!("Note added successfully.");
 }
 
+fn add_auto_note() -> Result<()> {
+    // load in the config file
+    let config = match Config::load() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("⚠️ Failed to load config: {e}");
+            return Err(e); 
+        }
+    };
+
+    // Run git diff HEAD
+    let output = Command::new("git")
+        .args([
+            "diff", "--unified=5",
+            "--ignore-blank-lines", "--ignore-space-at-eol",
+            "HEAD", "--", "*.rs", "*.toml", ":!Cargo.lock"
+        ])
+        .output()?;
+
+    // pass the diff output into the stdin of the summary command
+    let diff = String::from_utf8_lossy(&output.stdout);
+    add_note(&diff);
+
+    Ok(())
+}
+
+fn summary() {
+    println!("Showing summary...");
+}
+
+
 fn show(num: i32) {
     if num <= 0 {
         eprintln!("Please provide a positive number of entries to show.");
@@ -157,22 +195,23 @@ fn show(num: i32) {
     }
 }
 
-fn summary() {
-    println!("Showing summary...");
-}
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
         Commands::Init => init()?,
-        Commands::Note { note } => {
-            let final_note = match note {
-                Some(n) if !n.trim().is_empty() => n,
-                _ => prompt_reply("Write a note: ").unwrap(),
-            };
-            add_note(&final_note);
-        }
+        Commands::Add { note, auto } => {
+            if auto {
+                add_auto_note()?;
+            } else {
+                let final_note = match note {
+                    Some(n) if !n.trim().is_empty() => n,
+                    _ => prompt_reply("Write a note: ").unwrap(),
+                };
+                add_note(&final_note);
+            }
+        }        
         Commands::Show { num } => {
             let final_num = num.unwrap_or(3);
             show(final_num)
