@@ -21,6 +21,11 @@ use std::process::Command;
 use rprompt::prompt_reply;
 use chrono::Utc;
 use toml;
+use std::collections::HashMap;
+use walkdir::WalkDir;
+use regex::Regex;
+
+
 
 
 /// Search for a pattern in a file and display the lines that contain it.
@@ -31,12 +36,44 @@ struct Cli {
     command: Commands,
 }
 
+
+// Log entry struct
 #[derive(Serialize, Deserialize)]
 #[derive(Debug)]
 struct LogEntry {
     timestamp: String,
     note: String,
 }
+
+// full tree like project context
+#[derive(Serialize, Deserialize)]
+struct ProjectContext {
+    folders: HashMap<String, FolderNode>,
+    files: HashMap<String, FileContext>,
+}
+
+// individual folder nodes 
+#[derive(Serialize, Deserialize)]
+struct FolderNode {
+    children: Vec<String>, // just names of subfolders and files
+}
+
+// individual file nodes
+#[derive(Serialize, Deserialize)]
+struct FileContext {
+    language: String,
+    functions: Vec<FunctionInfo>,
+}
+
+// struct for each function definition
+#[derive(Serialize, Deserialize)]
+struct FunctionInfo {
+    name: String,
+    line: usize,
+    summary: Option<String>,
+    hash: String,
+}
+
 
 #[derive(Debug)]
 #[derive(Deserialize)]
@@ -102,9 +139,148 @@ fn init() -> Result<()> {
     file.write_all(CONFIG_TEXT.as_bytes())?;
     println!("Successfully wrote config file.");
 
+    // --- generate .codemap/context.json ---
+    let context_path = path.join("context.json");
+    let context_data = build_context()?; 
+    let json = serde_json::to_string_pretty(&context_data)?;
+    fs::write(context_path, json)?;
 
     Ok(())
 }
+
+// helper fucntion for building the context file
+fn build_context() -> Result<ProjectContext> {
+    // initialize maps for folders and files
+    let mut folders = HashMap::new();
+    let mut files = HashMap::new();
+
+    // remove all cache directories from being considered
+    let ignored_dirs = ["target", ".git", "node_modules", ".venv", "__pycache__"];
+    // recursively walk through every file and folder
+    for entry in WalkDir::new(".") {
+        let entry = entry.unwrap(); // Handle errors properly 
+        let path = entry.path();
+
+        // remove cache directories from consideration
+        if entry.path().components().any(|c| ignored_dirs.contains(&c.as_os_str().to_string_lossy().as_ref())) {
+            continue;
+        }
+
+        // remove hidden directories from consideration
+        if entry.file_name().to_string_lossy().starts_with('.') &&
+        !entry.file_name().to_string_lossy().starts_with(".codemap") {
+            continue;
+        }
+
+        if path.is_dir() {
+            let mut children = vec![];
+
+            for child in fs::read_dir(path)? {
+                let child = child?;
+                let name = child.file_name().to_string_lossy().to_string();
+                children.push(name);
+            }
+            let relative_path = path.strip_prefix(".")?.display().to_string();  
+            folders.insert(relative_path, FolderNode { children });
+        }
+
+        if path.is_file() {
+            if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                if let Some(lang) = detect_language(ext) {
+                    let contents = fs::read_to_string(path)?;
+                    let functions = extract_functions(&contents, &lang);
+
+                    let file_context = FileContext {
+                        language: lang,
+                        functions,
+                    };
+
+                    let rel = path.strip_prefix(".")?.display().to_string();
+                    files.insert(rel, file_context);
+                }
+            }
+        }
+    }
+
+
+    Ok(ProjectContext { folders, files })
+}
+
+// helper function for detecting language
+fn detect_language(extension: &str) -> Option<String> {
+    match extension.to_ascii_lowercase().as_str() {
+        "rs" => Some("rust".to_string()),
+        "py" => Some("python".to_string()),
+        "js" => Some("javascript".to_string()),
+        "ts" => Some("typescript".to_string()),
+        "java" => Some("java".to_string()),
+        "go" => Some("go".to_string()),
+        "cpp" | "cc" | "cxx" | "c++" => Some("cpp".to_string()),
+        "c" => Some("c".to_string()),
+        _ => None,
+    }
+}
+
+// helper function for extraction functions
+fn extract_functions(source: &str, lang: &str) -> Vec<FunctionInfo> {
+    let mut functions = Vec::new();
+
+    if lang == "rust" {
+        let re = Regex::new(r"^\s*(pub\s+)?(async\s+)?fn\s+(\w+)").unwrap(); // // Compile a regex to match Rust function defs
+        let lines: Vec<&str> = source.lines().collect(); // Split the file source into a list of lines for line-by-line analysis
+
+        for i in 0..lines.len() { // Loop through each line and try to detect function definitions
+            if let Some(caps) = re.captures(lines[i]) {    // If the current line matches the function regex, capture it
+                let name = caps.get(3).unwrap().as_str().to_string(); // this gets the actual name of the function
+
+                // Function body extraction
+                let mut body = String::new(); // new empty string for the body
+                let mut open_brackets = 0; // open brcket counter to know when we hit the end
+                let mut found_brace = false; // indicates if we hit a brace
+
+                for j in i..lines.len() { // iterate through the whole page
+                    let line = lines[j]; // set line equal to current lines
+                    body.push_str(line); // adds each new strign to the body 
+                    body.push('\n'); // for readability
+
+                    for c in line.chars() {  // iterates through eveyr character and checks for brace
+                        if c == '{' {
+                            open_brackets += 1;
+                            found_brace = true;
+                        } else if c == '}' {
+                            open_brackets -= 1;
+                        }
+                    }
+
+                    if found_brace && open_brackets == 0 {
+                        break;
+                    }
+                }
+
+                let hash = hash_string(&body);
+
+                functions.push(FunctionInfo {
+                    name,
+                    line: i + 1,
+                    summary: None,
+                    hash,
+                });
+            }
+        }
+    }
+
+    functions
+}
+
+
+fn hash_string(input: &str) -> String {
+    use sha2::{Sha256, Digest};
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    let result = hasher.finalize();
+    hex::encode(result)
+}
+
 
 fn add_note(note: &str) {
     let path = Path::new(".codemap/");
