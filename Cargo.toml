@@ -1,5 +1,5 @@
 [package]
-name = "codemap"
+name = "codemap-cli"
 version = "0.1.0-beta.1"
 edition = "2021"
 authors = ["Ishaq Breiwish <ishaq.breiwish@gmail.com>"]
