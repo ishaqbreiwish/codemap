@@ -1,6 +1,6 @@
 [package]
 name = "codemap-cli"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 edition = "2021"
 description = "A CLI for understanding and onboarding to codebases"
 license = "MIT"
