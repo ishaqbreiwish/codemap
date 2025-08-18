@@ -263,21 +263,14 @@ fn build_context() -> Result<ProjectContext> {
             folders.insert(relative_path, FolderNode { children });
         }
 
-        if path.is_file() {
-            if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                if let Some(lang) = detect_language(ext) {
-                    if let Ok(contents) = fs::read_to_string(path) {
-                        let functions = extract_functions(&contents, &lang);
-                        let rel = path.strip_prefix(".")?.display().to_string();
-                        files.insert(
-                            rel,
-                            FileContext {
-                                language: lang,
-                                functions,
-                            },
-                        );
-                    }
-                    
+        // inside build_context(), in the `if path.is_file()` block, replace the read_to_string usage with:
+if path.is_file() {
+    if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+        if let Some(lang) = detect_language(ext) {
+            // Read raw bytes (handles binary/invalid-UTF8 safely)
+            match fs::read(path) {
+                Ok(bytes) => {
+                    let contents = String::from_utf8_lossy(&bytes); // contents: Cow<str>
                     let functions = extract_functions(&contents, &lang);
                     let rel = path.strip_prefix(".")?.display().to_string();
                     files.insert(
@@ -288,8 +281,14 @@ fn build_context() -> Result<ProjectContext> {
                         },
                     );
                 }
+                Err(_) => {
+                    // unreadable file -> skip
+                }
             }
         }
+    }
+}
+
     }
 
     Ok(ProjectContext {
