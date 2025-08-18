@@ -1,7 +1,17 @@
 [package]
 name = "codemap"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 edition = "2021"
+authors = ["Ishaq Breiwish <ishaq.breiwish@gmail.com>"]
+license = "MIT"
+description = "A CLI for understanding and onboarding to codebases"
+repository = "https://github.com/yourusername/codemap"
+
+
+[[bin]]
+name = "codemap"
+path = "src/main.rs"
+
 
 [dependencies]
 anyhow = "1"
