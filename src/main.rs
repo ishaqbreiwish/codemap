@@ -266,7 +266,18 @@ fn build_context() -> Result<ProjectContext> {
         if path.is_file() {
             if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
                 if let Some(lang) = detect_language(ext) {
-                    let contents = fs::read_to_string(path)?;
+                    if let Ok(contents) = fs::read_to_string(path) {
+                        let functions = extract_functions(&contents, &lang);
+                        let rel = path.strip_prefix(".")?.display().to_string();
+                        files.insert(
+                            rel,
+                            FileContext {
+                                language: lang,
+                                functions,
+                            },
+                        );
+                    }
+                    
                     let functions = extract_functions(&contents, &lang);
                     let rel = path.strip_prefix(".")?.display().to_string();
                     files.insert(
