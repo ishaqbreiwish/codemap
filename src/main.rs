@@ -24,8 +24,31 @@ use toml;
 use std::collections::HashMap;
 use walkdir::WalkDir;
 use regex::Regex;
+use std::time::Instant;
+use std::collections::HashMap;
 
 
+
+
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
+struct FileDiffMetrics {
+    added: usize,
+    modified: usize,
+    removed: usize,
+    unchanged: usize,
+}
+
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
+struct UpdateMetrics {
+    total_files: usize,
+    total_functions: usize,
+    added_functions: usize,
+    modified_functions: usize,
+    removed_functions: usize,
+    unchanged_functions: usize,
+    reuse_ratio: f32,         // unchanged / (unchanged + modified)
+    duration_ms: u128,        // wall-clock for update
+}
 
 
 /// Search for a pattern in a file and display the lines that contain it.
@@ -46,27 +69,27 @@ struct LogEntry {
 }
 
 // full tree like project context
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct ProjectContext {
     folders: HashMap<String, FolderNode>,
     files: HashMap<String, FileContext>,
 }
 
 // individual folder nodes 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct FolderNode {
     children: Vec<String>, // just names of subfolders and files
 }
 
 // individual file nodes
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct FileContext {
     language: String,
     functions: Vec<FunctionInfo>,
 }
 
 // struct for each function definition
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct FunctionInfo {
     name: String,
     line: usize,
@@ -104,11 +127,9 @@ impl Config {
 #[command(rename_all = "lowercase")]
 enum Commands {
     Init, // initializes remind me project
-    Add {
-        note: Option<String>,
-        #[arg(long)]
-        auto: bool,
-    },
+    Update,
+    Edit,
+    Delete,
     Show {num: Option<i32>},
     Summary,
 }
@@ -281,67 +302,106 @@ fn hash_string(input: &str) -> String {
     hex::encode(result)
 }
 
-
-fn add_note(note: &str) {
+fn load_previous_context() -> Result<ProjectContext> {
     let path = Path::new(".codemap/");
-    let log_path = path.join("log.json");
-    
-    // check if codemap is there
-    if !path.exists() || !path.is_dir() {
-        println!("Error: This project is not initialized with `codemap init`.");
-        return;
+
+    if !path.is_dir() {
+        return Err(anyhow!("Codemap has not been initialized yet, run `codemap init`"));
     }
 
-    let final_note = note.to_string();
-
-    // new entry
-    let timestamp = Utc::now().format("%m/%d/%Y").to_string();
-    let entry = LogEntry {
-        timestamp,
-        note: final_note,
-    };
-
-    // Read existing log as string
-    let content = fs::read_to_string(&log_path).unwrap_or_else(|_| String::new());
-
-    // Parse as JSON, or default to empty vec
-    let mut log_json: Vec<LogEntry> = serde_json::from_str(&content).unwrap_or_else(|_| vec![]);
-
-    // Push new entry
-    log_json.push(entry);
-
-    // Write full log back
-    let json = serde_json::to_string_pretty(&log_json).expect("Failed to serialize log.");
-    fs::write(&log_path, json).expect("Failed to write log.");
-
-    println!("Note added successfully.");
+    let context_path = path.join("context.json");
+    let json = fs::read_to_string(context_path)?;
+    let context: ProjectContext = serde_json::from_str(&json)?;
+    Ok(context)
 }
 
-fn add_auto_note() -> Result<()> {
-    // load in the config file
-    let config = match Config::load() {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            eprintln!("⚠️ Failed to load config: {e}");
-            return Err(e); 
-        }
+
+/// merge functions from an old file snapshot with a new one
+/// - keeps unchanged functions (preserve old summary)
+/// - updates changed ones (reset summary)
+/// - adds new ones
+/// - drops deleted ones
+fn merge_file_contexts(old: &FileContext, newf: &FileContext) -> FileContext {
+    // build a map: function name -> old FunctionInfo
+    // lets us quickly check if a function existed before
+    let mut old_map: HashMap<&str, &FunctionInfo> = HashMap::new();
+    for f in &old.functions {
+        old_map.insert(f.name.as_str(), f);
+    }
+
+    // start building the merged file context
+    let mut out = FileContext {
+        language: newf.language.clone(),
+        functions: Vec::new(),
     };
 
-    // Run git diff HEAD
-    let output = Command::new("git")
-        .args([
-            "diff", "--unified=5",
-            "--ignore-blank-lines", "--ignore-space-at-eol",
-            "HEAD", "--", "*.rs", "*.toml", ":!Cargo.lock"
-        ])
-        .output()?;
+    // walk through each function found in the *new* file snapshot
+    for nf in &newf.functions {
+        match old_map.get(nf.name.as_str()) {
+            // 1. function did not exist before → new function
+            None => {
+                out.functions.push(nf.clone());
+            }
 
-    // pass the diff output into the stdin of the summary command
-    let diff = String::from_utf8_lossy(&output.stdout);
-    add_note(&diff);
+            // 2. function existed before
+            Some(of) => {
+                if of.hash == nf.hash {
+                    // unchanged body → preserve old summary
+                    let mut kept = nf.clone();
+                    kept.summary = of.summary.clone();
+                    out.functions.push(kept);
+                } else {
+                    // body changed → reset summary (force refresh later)
+                    let mut changed = nf.clone();
+                    changed.summary = None;
+                    out.functions.push(changed);
+                }
+            }
+        }
+    }
 
+    // note: any function that was in old_map but not in newf.functions
+    // is treated as deleted, so we don't push it into `out`
+
+    out
+}
+
+
+// merges new and old contexts 
+fn merge_contexts(old_ctx: &ProjectContext, new_cts: &ProjectContext) -> Result<ProjectContext> {
+    let mut merged_files = HashMap::new();
+    let mut merged_folders = new_ctx.folders.clone(); // folders don't need diffing (optional)
+
+    for (file_path, new_file) in &new_ctx.files {
+        match old_ctx.files.get(file_path) {
+            None => {
+                merged_files.insert(file_path.clone(), new_file.clone());
+            }
+            Some(old_file) => {
+                let merged = merge_file_contexts(old_file, new_file);
+                merged_files.insert(file_path.clone(), merged);
+            }
+        }
+    }    
+    ProjectContext { folders: merged_folders, files: merged_files }
+}
+
+fn update_context() -> Result<()> {
+    let prev_context: ProjectContext = load_previous_context()?;
+    let new_context: ProjectContext = build_context()?;
+
+     // merge old + new
+     let merged = merge_contexts(&prev_context, &new_context)?;
+
+     // write merged to .codemap/context.json
+     let path = Path::new(".codemap/").join("context.json");
+     fs::write(&path, serde_json::to_string_pretty(&merged)?)?;
+ 
+     println!("Updated .codemap/context.json"); 
+    
     Ok(())
 }
+
 
 fn summary() {
     println!("Showing summary...");
@@ -377,22 +437,14 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Init => init()?,
-        Commands::Add { note, auto } => {
-            if auto {
-                add_auto_note()?;
-            } else {
-                let final_note = match note {
-                    Some(n) if !n.trim().is_empty() => n,
-                    _ => prompt_reply("Write a note: ").unwrap(),
-                };
-                add_note(&final_note);
-            }
-        }        
+        Commands::Update => {update_context()?;},
         Commands::Show { num } => {
             let final_num = num.unwrap_or(3);
             show(final_num)
         }
         Commands::Summary => summary(),
+        Commands::Edit => summary(),
+        Commands::Delete => summary(),
     }
     
 
