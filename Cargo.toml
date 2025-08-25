@@ -1,17 +1,17 @@
 [package]
 name = "codemap-cli"
-version = "0.1.0-beta.6"
+version = "0.2.0"
 edition = "2021"
-description = "A CLI for understanding and onboarding to codebases"
+description = "An intelligent codebase onboarding and analysis tool"
 license = "MIT"
 repository = "https://github.com/ishaqbreiwish/codemap"
-
-
+authors = ["Your Name <your.email@example.com>"]
+keywords = ["onboarding", "codebase", "analysis", "cli", "ai"]
+categories = ["development-tools", "command-line-utilities"]
 
 [[bin]]
 name = "codemap"
 path = "src/main.rs"
-
 
 [dependencies]
 anyhow = "1"
@@ -25,5 +25,21 @@ toml = "0.8"
 walkdir = "2"
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 rprompt = "2"
+# Beautiful terminal output
+console = "0.15"
+indicatif = "0.17"
+colored = "2"
+# Rich text formatting
+tabled = "0.15"
+# Better error handling
+thiserror = "1"
+# Async support for better performance
+tokio = { version = "1", features = ["full"] }
+# Additional analysis capabilities
+ignore = "0.4"
+# Configuration management
+config = "0.14"
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
 
 
